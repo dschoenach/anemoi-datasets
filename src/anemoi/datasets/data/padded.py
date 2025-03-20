@@ -19,6 +19,7 @@ import numpy as np
 from anemoi.utils.dates import frequency_to_timedelta
 from numpy.typing import NDArray
 
+from anemoi.datasets.data.dataset import Dataset
 from anemoi.datasets.data.dataset import FullIndex
 from anemoi.datasets.data.dataset import Shape
 from anemoi.datasets.data.dataset import TupleIndex
@@ -26,26 +27,10 @@ from anemoi.datasets.data.debug import Node
 from anemoi.datasets.data.debug import debug_indexing
 from anemoi.datasets.data.forwards import Forwards
 from anemoi.datasets.data.indexing import expand_list_indexing
+from anemoi.datasets.data.misc import as_first_date
+from anemoi.datasets.data.misc import as_last_date
 
 LOG = logging.getLogger(__name__)
-
-
-def _normalise_date(date, default):
-    if date is None:
-        date = default
-
-    if isinstance(date, str):
-        try:
-            date = datetime.datetime.fromisoformat(date)
-        except ValueError:
-            raise ValueError(f"Invalid date {date}, only isoformat is supported with padding")
-
-    if isinstance(date, datetime.datetime):
-        date = np.datetime64(date, "s")
-
-    assert isinstance(date, np.datetime64), (date, type(date))
-
-    return date
 
 
 class Padded(Forwards):
@@ -53,7 +38,17 @@ class Padded(Forwards):
     _after: int = 0
     _inside: int = 0
 
-    def __init__(self, dataset, start, end, frequency, reason):
+    def __init__(self, dataset: Dataset, start: str, end: str, frequency: str, reason: Dict[str, Any]) -> None:
+        """Create a padded subset of a dataset.
+
+        Attributes:
+        dataset (Dataset): The dataset to subset.
+        start (str): The start date of the subset.
+        end (str): The end date of the subset.
+        frequency (str): The frequency of the subset.
+        reason (Dict[str, Any]): The reason for the padding.
+        """
+
         self.reason = {k: v for k, v in reason.items() if v is not None}
 
         if frequency is None:
@@ -61,33 +56,69 @@ class Padded(Forwards):
 
         self._frequency = frequency_to_timedelta(frequency)
 
-        start = _normalise_date(start, dataset.dates[0])
-        end = _normalise_date(end, dataset.dates[-1])
+        if start is None:
+            # default is to start at the first date
+            start = dataset.dates[0]
+        else:
+            start = as_first_date(start, None)
+
+        if end is None:
+            # default is to end at the last date
+            end = dataset.dates[-1]
+        else:
+            end = as_last_date(end, None)
 
         assert isinstance(dataset.dates[0], np.datetime64), (dataset.dates[0], type(dataset.dates[0]))
 
+        # start is the requested start date
+        # end is the requested end date
+        # first is the first date of the dataset
+        first = dataset.dates[0]
+        # last is the last date of the dataset
+        last = dataset.dates[-1]
+
         timedelta = np.array([frequency], dtype="timedelta64[s]")[0]
 
-        dates_parts = []
+        before_end = min(end + timedelta, first)
+        before_part = np.arange(start, before_end, timedelta)
+        if start < first:
+            # if the start date is before the first date of the dataset, there is a "before" part
+            assert len(before_part) > 0, (start, first, before_end)
+        if start == first:
+            # if the start date is the first date of the dataset, there is no "before" part
+            assert len(before_part) == 0, (start, first, before_end)
 
-        if start < dataset.dates[0]:
-            dates_parts.append(np.arange(start, dataset.dates[0], timedelta))
-            self._before = len(dates_parts[-1])
+        # if the start date is before the last date of the dataset
+        # and the end date is after the first date of the dataset
+        # there is an "inside" part
+        if start < last and end > first:
+            inside_start = max(start, first)
+            inside_end = min(end, last)
+            self.dataset = dataset._subset(start=inside_start, end=inside_end)
+            inside_part = self.dataset.dates
 
-        dates_parts.append(dataset.dates)
-        self._inside = len(dates_parts[-1])
+        after_start = max(start, last) + timedelta
+        after_part = np.arange(after_start, end + timedelta, timedelta)
+        if end > last:
+            # if the end date is after the last date of the dataset, there is an "after" part
+            assert len(after_part) > 0, (end, last, after_start)
+        if end == last:
+            assert len(after_part) == 0, (end, last, after_start)
 
-        if end > dataset.dates[-1]:
-            dates_parts.append(np.arange(dataset.dates[-1] + timedelta, end + timedelta, timedelta))
-            self._after = len(dates_parts[-1])
+        self._dates = np.hstack([before_part, inside_part, after_part])
+        self._before = len(before_part)
+        self._inside = len(inside_part)
+        self._after = len(after_part)
 
-        self._dates = np.hstack(dates_parts)
         assert len(self._dates) == self._before + self._inside + self._after, (
             len(self._dates),
             self._before,
             self._inside,
             self._after,
         )
+
+        assert self._dates[0] == start, (self._dates[0], start)
+        assert self._dates[-1] == end, (self._dates[-1], end)
 
         # Forward other properties to the super dataset
         super().__init__(dataset)
@@ -106,7 +137,7 @@ class Padded(Forwards):
         if (self._before + self._inside) <= n < (self._before + self._inside + self._after):
             return self.empty_item()
 
-        return self.forward[n - self._before]
+        return self.dataset[n - self._before]
 
     @debug_indexing
     def _get_slice(self, s: slice) -> NDArray[Any]:
@@ -120,7 +151,7 @@ class Padded(Forwards):
         return [self[i] for i in n]
 
     def empty_item(self):
-        return self.forward.empty_item()
+        return self.dataset.empty_item()
 
     def __len__(self) -> int:
         return len(self._dates)
@@ -136,7 +167,7 @@ class Padded(Forwards):
 
     @property
     def shape(self) -> Shape:
-        return (len(self.dates),) + self.forward.shape[1:]
+        return (len(self.dates),) + self.dataset.shape[1:]
 
     @cached_property
     def missing(self) -> Set[int]:
@@ -149,7 +180,7 @@ class Padded(Forwards):
         Returns:
         Node: The tree representation of the subset.
         """
-        return Node(self, [self.forward.tree()], **self.reason)
+        return Node(self, [self.dataset.tree()], **self.reason)
 
     def forwards_subclass_metadata_specific(self) -> Dict[str, Any]:
         """Get the metadata specific to the forwards subclass.
@@ -161,3 +192,11 @@ class Padded(Forwards):
             # "indices": self.indices,
             "reason": self.reason,
         }
+
+    def __repr__(self) -> str:
+        """Get the string representation of the subset.
+
+        Returns:
+        str: The string representation of the subset.
+        """
+        return f"Padded({self.forward}, {self.dates[0]}...{self.dates[-1]}, frequency={self.frequency})"

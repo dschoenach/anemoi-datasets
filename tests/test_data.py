@@ -674,6 +674,25 @@ def test_join_3() -> None:
 
 
 @mockup_open_zarr
+def test_padding_1() -> None:
+    """Test subsetting a dataset (case 2)."""
+    test = DatasetTester("test-2022-2022-1h-o96-abcd", start="2021-01-01", end="2023-12-31 23:00:00", padding=True)
+    test.run(
+        expected_class=Padded,
+        expected_length=365 * 24 * 3,
+        expected_shape=(365 * 24 * 3, 4, 1, VALUES),
+        expected_variables="abcd",
+        expected_name_to_index="abcd",
+        date_to_row=lambda date: simple_row(date, "abcd") if date.year == 2022 else np.zeros((4, 1, 0)),
+        start_date=datetime.datetime(2021, 1, 1),
+        time_increment=datetime.timedelta(hours=1),
+        statistics_reference_dataset="test-2022-2022-1h-o96-abcd",
+        statistics_reference_variables="abcd",
+        regular_shape=False,
+    )
+
+
+@mockup_open_zarr
 def test_subset_1() -> None:
     """Test subsetting a dataset (case 1)."""
     test = DatasetTester("test-2021-2023-1h-o96-abcd", frequency=12)
@@ -706,25 +725,6 @@ def test_subset_2() -> None:
         time_increment=datetime.timedelta(hours=1),
         statistics_reference_dataset="test-2021-2023-1h-o96-abcd",
         statistics_reference_variables="abcd",
-    )
-
-
-@mockup_open_zarr
-def test_subset_2_padding() -> None:
-    """Test subsetting a dataset (case 2)."""
-    test = DatasetTester("test-2022-2022-1h-o96-abcd", start="2021-01-01", end="2023-12-31 23:00", padding=True)
-    test.run(
-        expected_class=Padded,
-        expected_length=365 * 24 * 3,
-        expected_shape=(365 * 24 * 3, 4, 1, VALUES),
-        expected_variables="abcd",
-        expected_name_to_index="abcd",
-        date_to_row=lambda date: simple_row(date, "abcd") if date.year == 2022 else np.zeros((4, 1, 0)),
-        start_date=datetime.datetime(2021, 1, 1),
-        time_increment=datetime.timedelta(hours=1),
-        statistics_reference_dataset="test-2022-2022-1h-o96-abcd",
-        statistics_reference_variables="abcd",
-        regular_shape=False,
     )
 
 
